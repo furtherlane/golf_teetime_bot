@@ -60,7 +60,9 @@ def run():
     print(f"Number of days available to reserve: {len(calendar_day_list)}")
 
     # the last non-disabled calendar day is the one we want to click on, so let's do it!
-    last_available_day = calendar_day_list[-2]
+    # Note: for Essex County, tee times open up 7 days in advance (14 days for Gold Members)
+    # To test it for Gold before 9PM EST, change the following line to: last_available_day = calendar_day_list[-2]
+    last_available_day = calendar_day_list[-1]
     print(f"Last available day to reserve is: {last_available_day.text}, clicking it to bring up that date's tee times")
     last_available_day.click()
 
