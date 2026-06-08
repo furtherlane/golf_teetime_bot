@@ -1,0 +1,40 @@
+name: Book Tee Time
+
+on:
+  schedule:
+    - cron: '0 2 * * 6'  # Friday 9:00 PM EST (UTC-5) = Saturday 2:00 AM UTC
+  workflow_dispatch:      # allows manual trigger for testing
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env file from secrets
+        run: |
+          cat > .env << EOF
+          FOREUP_SOFTWARE_URL="${{ secrets.FOREUP_SOFTWARE_URL }}"
+          FOREUP_USERNAME="${{ secrets.FOREUP_USERNAME }}"
+          FOREUP_PASSWORD="${{ secrets.FOREUP_PASSWORD }}"
+          TWOCAPTCHA_API_KEY="${{ secrets.TWOCAPTCHA_API_KEY }}"
+          EOF
+
+      - name: Run tee time booking script
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          export DISPLAY=:99
+          python selenium_reserve_tee_time.py
