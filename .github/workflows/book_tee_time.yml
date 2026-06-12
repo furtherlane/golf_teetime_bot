@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '40 0 * * 6'  # ~20 min before Friday 9:00 PM ET; script waits for the exact moment (DST-aware)
   workflow_dispatch:      # allows manual trigger for testing
+    inputs:
+      skip_wait:
+        description: 'Skip waiting until 9PM ET (for testing the rest of the flow now)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   book:
@@ -38,6 +44,8 @@ jobs:
           EOF
 
       - name: Run tee time booking script
+        env:
+          SKIP_WAIT: ${{ inputs.skip_wait }}
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           export DISPLAY=:99

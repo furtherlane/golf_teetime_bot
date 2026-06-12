@@ -1,4 +1,5 @@
 #!/Users/steve/apps/foreup-autores/.venv/bin/python3
+import os
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -60,7 +61,10 @@ def run():
         print("Logged in.", flush=True)
 
         # wait until exactly 9:00 PM Eastern before checking the calendar
-        wait_until_eastern(21, 0)
+        if os.environ.get("SKIP_WAIT", "").lower() == "true":
+            print("SKIP_WAIT is set, proceeding without waiting.", flush=True)
+        else:
+            wait_until_eastern(21, 0)
 
         # wait for calendar and select the last available day
         # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)
