@@ -42,3 +42,13 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 &
           export DISPLAY=:99
           python selenium_reserve_tee_time.py
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-diagnostics
+          path: |
+            error_screenshot.png
+            error_page_source.html
+          if-no-files-found: ignore
