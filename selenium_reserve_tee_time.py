@@ -3,6 +3,9 @@ import time
 import warnings
 warnings.filterwarnings("ignore")
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from dotenv import dotenv_values
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -13,6 +16,20 @@ from twocaptcha import TwoCaptcha
 from rich import print
 
 config = dotenv_values(".env")
+
+
+def wait_until_eastern(hour, minute):
+    """Sleep until the given hour:minute today in America/New_York (handles EST/EDT automatically)."""
+    eastern = ZoneInfo("America/New_York")
+    now = datetime.now(eastern)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        print(f"Target time {target.strftime('%I:%M %p %Z')} already passed, proceeding immediately.")
+        return
+    wait_seconds = (target - now).total_seconds()
+    print(f"Waiting {wait_seconds:.0f}s until {target.strftime('%I:%M:%S %p %Z')} before checking calendar...")
+    time.sleep(wait_seconds)
+    print("Target time reached.")
 
 
 def run():
@@ -32,6 +49,10 @@ def run():
     driver.find_element(By.XPATH, '//*[@id="login_email"]').send_keys(config["FOREUP_USERNAME"])
     driver.find_element(By.XPATH, '//*[@id="login_password"]').send_keys(config["FOREUP_PASSWORD"])
     driver.find_element(By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]").click()
+
+    # wait until exactly 9:00 PM Eastern, then reload so the calendar reflects the newly opened day
+    wait_until_eastern(21, 0)
+    driver.refresh()
 
     # wait for calendar and select the last available day
     # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)

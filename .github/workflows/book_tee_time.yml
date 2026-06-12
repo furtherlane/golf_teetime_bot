@@ -2,7 +2,7 @@ name: Book Tee Time
 
 on:
   schedule:
-    - cron: '0 1 * * 5'  # TEMP: Thursday 9:00 PM EDT (UTC-4) = Friday 1:00 AM UTC, for testing on 2026-06-11
+    - cron: '40 0 * * 6'  # ~20 min before Friday 9:00 PM ET; script waits for the exact moment (DST-aware)
   workflow_dispatch:      # allows manual trigger for testing
 
 jobs:
