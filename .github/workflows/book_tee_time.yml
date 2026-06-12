@@ -2,7 +2,7 @@ name: Book Tee Time
 
 on:
   schedule:
-    - cron: '0 2 * * 6'  # Friday 9:00 PM EST (UTC-5) = Saturday 2:00 AM UTC
+    - cron: '0 1 * * 5'  # TEMP: Thursday 9:00 PM EDT (UTC-4) = Friday 1:00 AM UTC, for testing on 2026-06-11
   workflow_dispatch:      # allows manual trigger for testing
 
 jobs:
