@@ -34,21 +34,28 @@ def wait_until_eastern(hour, minute):
 
 def run():
 
+    print("Launching Chrome...", flush=True)
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
     driver = uc.Chrome(options=options, headless=False)
+    driver.set_page_load_timeout(60)
+    print("Chrome launched.", flush=True)
 
+    print(f"Loading {config['FOREUP_SOFTWARE_URL']}...", flush=True)
     driver.get(config["FOREUP_SOFTWARE_URL"])
+    print("Page loaded.", flush=True)
 
     # click Gold Member booking class button
     WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div/div[2]/div/div/button[3]")))
     driver.find_element(By.XPATH, "/html/body/div[2]/div/div[2]/div/div/button[3]").click()
+    print("Clicked booking class button.", flush=True)
 
     # log in
     driver.find_element(By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]").click()
     driver.find_element(By.XPATH, '//*[@id="login_email"]').send_keys(config["FOREUP_USERNAME"])
     driver.find_element(By.XPATH, '//*[@id="login_password"]').send_keys(config["FOREUP_PASSWORD"])
     driver.find_element(By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]").click()
+    print("Logged in.", flush=True)
 
     # wait until exactly 9:00 PM Eastern, then reload so the calendar reflects the newly opened day
     wait_until_eastern(21, 0)
