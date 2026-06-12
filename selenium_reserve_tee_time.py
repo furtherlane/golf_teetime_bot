@@ -58,9 +58,8 @@ def run():
     driver.find_element(By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]").click()
     print("Logged in.", flush=True)
 
-    # wait until exactly 9:00 PM Eastern, then reload so the calendar reflects the newly opened day
+    # wait until exactly 9:00 PM Eastern before checking the calendar
     wait_until_eastern(21, 0)
-    driver.refresh()
 
     # wait for calendar and select the last available day
     # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)
