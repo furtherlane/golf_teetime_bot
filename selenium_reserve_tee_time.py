@@ -92,130 +92,167 @@ def run():
             lambda d: d.find_element(By.CSS_SELECTOR, '#times > div').text != "Loading Tee times..."
         )
 
-        first_tee_time = driver.find_element(By.CSS_SELECTOR, '#times > div > div:nth-child(1)')
-
-        if "no tee times available" in first_tee_time.text.lower():
-            print("\nNo tee times available for this date with the current filters.")
-            driver.close()
-            return
+        MAX_BOOKING_ATTEMPTS = 3
 
         # parse and display tee time info
         course_select = driver.find_element(By.XPATH, "/html/body/div[2]/div/div[2]/div[1]/div/div[1]/div/select")
         course = course_select.find_element(By.XPATH, "option[@selected]").text
 
-        def print_tee_time_info(tee_time_element):
+        def print_tee_time_info(tee_time_element, label):
             parts = tee_time_element.text.split("\n")
             tee_time = parts[0] if len(parts) > 0 else "?"
             holes_players = parts[2].split() if len(parts) > 2 else []
             holes = holes_players[0] if len(holes_players) > 0 else "?"
             players = holes_players[1] if len(holes_players) > 1 else "?"
-            print(f"\nFirst Available Tee Time:")
+            print(f"\n{label}:")
             print(f"  Time:    {tee_time}")
             print(f"  Course:  {course}")
             print(f"  Holes:   {holes}")
             print(f"  Players: {players}")
 
-        print_tee_time_info(first_tee_time)
+        def close_booking_modal():
+            close_buttons = driver.find_elements(By.CSS_SELECTOR, "#book_time .close[data-dismiss='modal']")
+            if close_buttons:
+                close_buttons[0].click()
+                try:
+                    WebDriverWait(driver, 5).until(EC.invisibility_of_element_located((By.ID, "book_time")))
+                except TimeoutException:
+                    pass
 
-        # click the tee time to open the booking modal. Right around the 9pm release,
-        # #times can refresh out from under us, so if the modal doesn't open, re-read
-        # the current first available tee time and try again.
-        for attempt in range(3):
-            first_tee_time.click()
+        # try tee times for this date in order. If a booking attempt is rejected because
+        # the slot was grabbed by someone else in the meantime, fall back to the next
+        # available tee time for this date (up to MAX_BOOKING_ATTEMPTS).
+        for booking_attempt in range(1, MAX_BOOKING_ATTEMPTS + 1):
+            tee_time_selector = f'#times > div > div:nth-child({booking_attempt})'
+            tee_time_elements = driver.find_elements(By.CSS_SELECTOR, tee_time_selector)
+            if not tee_time_elements or "no tee times available" in tee_time_elements[0].text.lower():
+                print("\nNo more tee times available for this date with the current filters.")
+                driver.close()
+                return
+            tee_time_element = tee_time_elements[0]
+
+            label = "First Available Tee Time" if booking_attempt == 1 else f"Next Available Tee Time (attempt {booking_attempt}/{MAX_BOOKING_ATTEMPTS})"
+            print_tee_time_info(tee_time_element, label)
+
+            # click the tee time to open the booking modal. Right around the 9pm release,
+            # #times can refresh out from under us, so if the modal doesn't open, re-read
+            # the tee time at this position and try again.
+            for attempt in range(3):
+                tee_time_element.click()
+                try:
+                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "book_time")))
+                    break
+                except TimeoutException:
+                    print(f"\nBooking modal didn't open (attempt {attempt + 1}/3) - tee times list may have refreshed. Retrying...")
+                    tee_time_elements = driver.find_elements(By.CSS_SELECTOR, tee_time_selector)
+                    if not tee_time_elements or "no tee times available" in tee_time_elements[0].text.lower():
+                        print("\nNo tee times available for this date with the current filters.")
+                        driver.close()
+                        return
+                    tee_time_element = tee_time_elements[0]
+                    print_tee_time_info(tee_time_element, label)
+            else:
+                raise TimeoutException("Booking modal did not open after 3 attempts")
+
+            # verify the modal's date matches the calendar day we selected before booking anything.
+            # If the selected day's tee times aren't released yet, #times can fall back to showing
+            # a different date's availability while the calendar still shows our day as selected.
+            modal_lines = driver.find_element(By.ID, "book_time").text.split("\n")
             try:
-                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "book_time")))
-                break
-            except TimeoutException:
-                print(f"\nBooking modal didn't open (attempt {attempt + 1}/3) - tee times list may have refreshed. Retrying...")
-                first_tee_time = driver.find_element(By.CSS_SELECTOR, '#times > div > div:nth-child(1)')
-                if "no tee times available" in first_tee_time.text.lower():
-                    print("\nNo tee times available for this date with the current filters.")
-                    driver.close()
-                    return
-                print_tee_time_info(first_tee_time)
-        else:
-            raise TimeoutException("Booking modal did not open after 3 attempts")
+                modal_date_text = modal_lines[modal_lines.index("Date") + 1]
+            except (ValueError, IndexError):
+                modal_date_text = ""
 
-        # verify the modal's date matches the calendar day we selected before booking anything.
-        # If the selected day's tee times aren't released yet, #times can fall back to showing
-        # a different date's availability while the calendar still shows our day as selected.
-        modal_lines = driver.find_element(By.ID, "book_time").text.split("\n")
-        try:
-            modal_date_text = modal_lines[modal_lines.index("Date") + 1]
-        except (ValueError, IndexError):
-            modal_date_text = ""
+            modal_day_match = re.search(r"(\d{1,2}),", modal_date_text)
+            modal_day = modal_day_match.group(1) if modal_day_match else None
 
-        modal_day_match = re.search(r"(\d{1,2}),", modal_date_text)
-        modal_day = modal_day_match.group(1) if modal_day_match else None
+            if modal_day != expected_day:
+                print(f"\nABORTING: selected calendar day '{expected_day}' but booking modal shows date '{modal_date_text}'.")
+                print("The selected day's tee times may not be released yet. Not booking.")
+                driver.save_screenshot("date_mismatch_screenshot.png")
+                driver.close()
+                return
 
-        if modal_day != expected_day:
-            print(f"\nABORTING: selected calendar day '{expected_day}' but booking modal shows date '{modal_date_text}'.")
-            print("The selected day's tee times may not be released yet. Not booking.")
-            driver.save_screenshot("date_mismatch_screenshot.png")
-            driver.close()
-            return
+            print(f"\nDate verified: modal shows '{modal_date_text}', matching selected calendar day '{expected_day}'.")
 
-        print(f"\nDate verified: modal shows '{modal_date_text}', matching selected calendar day '{expected_day}'.")
+            if os.environ.get("DRY_RUN", "").lower() == "true":
+                print("\nDRY_RUN is set - stopping before 'Book Time'. Would have booked the time/date above.")
+                driver.close()
+                return
 
-        if os.environ.get("DRY_RUN", "").lower() == "true":
-            print("\nDRY_RUN is set - stopping before 'Book Time'. Would have booked the time/date above.")
-            driver.close()
-            return
+            # select 1 player in the modal
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")))
+            driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active").click()
 
-        # select 1 player in the modal
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")))
-        driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active").click()
+            # click Book Time
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")))
+            driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left").click()
+            print("\nBook button clicked, checking for CAPTCHA...")
 
-        # click Book Time
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")))
-        driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left").click()
-        print("\nBook button clicked, checking for CAPTCHA...")
+            # solve reCAPTCHA via 2captcha if it appears
+            time.sleep(2)
+            recaptcha_elements = driver.find_elements(By.CSS_SELECTOR, ".g-recaptcha, iframe[src*='recaptcha']")
+            if recaptcha_elements:
+                print("CAPTCHA detected, solving via 2captcha...")
+                site_key = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha").get_attribute("data-sitekey")
+                solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
+                result = solver.recaptcha(sitekey=site_key, url=driver.current_url, invisible=1)
+                captcha_token = result["code"]
+                print("CAPTCHA solved, injecting token...")
 
-        # solve reCAPTCHA via 2captcha if it appears
-        time.sleep(2)
-        recaptcha_elements = driver.find_elements(By.CSS_SELECTOR, ".g-recaptcha, iframe[src*='recaptcha']")
-        if recaptcha_elements:
-            print("CAPTCHA detected, solving via 2captcha...")
-            site_key = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha").get_attribute("data-sitekey")
-            solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
-            result = solver.recaptcha(sitekey=site_key, url=driver.current_url, invisible=1)
-            captcha_token = result["code"]
-            print("CAPTCHA solved, injecting token...")
+                driver.execute_script(f"""
+                    document.querySelectorAll('[name="g-recaptcha-response"]').forEach(function(el) {{
+                        el.value = "{captcha_token}";
+                    }});
+                """)
+                time.sleep(1)
+                book_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")
+                driver.execute_script("arguments[0].click();", book_btn)
+            else:
+                print("No CAPTCHA detected.")
 
-            driver.execute_script(f"""
-                document.querySelectorAll('[name="g-recaptcha-response"]').forEach(function(el) {{
-                    el.value = "{captcha_token}";
-                }});
-            """)
-            time.sleep(1)
-            book_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")
-            driver.execute_script("arguments[0].click();", book_btn)
-        else:
-            print("No CAPTCHA detected.")
-
-        # wait for confirmation
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.any_of(
-                    EC.invisibility_of_element_located((By.ID, "book_time")),
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".alert-success")),
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".alert-danger")),
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".js-booking-confirmation")),
-                    EC.url_contains("confirmation"),
+            # wait for confirmation
+            try:
+                WebDriverWait(driver, 20).until(
+                    EC.any_of(
+                        EC.invisibility_of_element_located((By.ID, "book_time")),
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".alert-success")),
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".alert-danger")),
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".js-booking-confirmation")),
+                        EC.url_contains("confirmation"),
+                    )
                 )
-            )
-            for selector in [".alert-success", ".alert-danger", ".js-booking-confirmation"]:
+            except TimeoutException:
+                print(f"\nTimed out waiting for confirmation. Check the booking system to verify.")
+                time.sleep(60)
+                driver.close()
+                return
+
+            # if the booking was rejected (e.g. someone else grabbed this slot first),
+            # close the modal and fall back to the next available tee time for this date.
+            danger_elements = driver.find_elements(By.CSS_SELECTOR, ".alert-danger")
+            if danger_elements:
+                print(f"\nBooking attempt rejected: {danger_elements[0].text}")
+                if booking_attempt < MAX_BOOKING_ATTEMPTS:
+                    print("This tee time may have just been booked by someone else - trying the next available time...")
+                    close_booking_modal()
+                    continue
+                print(f"\nGiving up after {MAX_BOOKING_ATTEMPTS} attempts.")
+                time.sleep(60)
+                driver.close()
+                return
+
+            for selector in [".alert-success", ".js-booking-confirmation"]:
                 elements = driver.find_elements(By.CSS_SELECTOR, selector)
                 if elements:
                     print(f"\nBooking result: {elements[0].text}")
                     break
             else:
                 print(f"\nBooking completed successfully!")
-        except:
-            print(f"\nTimed out waiting for confirmation. Check the booking system to verify.")
 
-        time.sleep(60)
-        driver.close()
+            time.sleep(60)
+            driver.close()
+            return
 
     except Exception:
         print("\nError occurred - saving screenshot and page source for debugging.", flush=True)
