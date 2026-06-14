@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+      dry_run:
+        description: 'Stop before clicking Book Time (no real reservation made)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   book:
@@ -46,6 +51,7 @@ jobs:
       - name: Run tee time booking script
         env:
           SKIP_WAIT: ${{ inputs.skip_wait }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           export DISPLAY=:99
