@@ -1,5 +1,6 @@
 #!/Users/steve/apps/foreup-autores/.venv/bin/python3
 import os
+import re
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -75,7 +76,8 @@ def run():
         print(f"Number of days available to reserve: {len(calendar_day_list)}")
 
         last_available_day = calendar_day_list[-1]
-        print(f"Selecting date: {last_available_day.text}")
+        expected_day = last_available_day.text.strip()
+        print(f"Selecting date: {expected_day}")
         last_available_day.click()
 
         # filter to 1 player
@@ -113,6 +115,33 @@ def run():
 
         # click the tee time to open the booking modal
         first_tee_time.click()
+
+        # verify the modal's date matches the calendar day we selected before booking anything.
+        # If the selected day's tee times aren't released yet, #times can fall back to showing
+        # a different date's availability while the calendar still shows our day as selected.
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "book_time")))
+        modal_lines = driver.find_element(By.ID, "book_time").text.split("\n")
+        try:
+            modal_date_text = modal_lines[modal_lines.index("Date") + 1]
+        except (ValueError, IndexError):
+            modal_date_text = ""
+
+        modal_day_match = re.search(r"(\d{1,2}),", modal_date_text)
+        modal_day = modal_day_match.group(1) if modal_day_match else None
+
+        if modal_day != expected_day:
+            print(f"\nABORTING: selected calendar day '{expected_day}' but booking modal shows date '{modal_date_text}'.")
+            print("The selected day's tee times may not be released yet. Not booking.")
+            driver.save_screenshot("date_mismatch_screenshot.png")
+            driver.close()
+            return
+
+        print(f"\nDate verified: modal shows '{modal_date_text}', matching selected calendar day '{expected_day}'.")
+
+        if os.environ.get("DRY_RUN", "").lower() == "true":
+            print("\nDRY_RUN is set - stopping before 'Book Time'. Would have booked the time/date above.")
+            driver.close()
+            return
 
         # select 1 player in the modal
         WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")))

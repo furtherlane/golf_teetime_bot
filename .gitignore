@@ -3,6 +3,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Local Claude Code settings
+.claude/
+
+# Debug artifacts from selenium_reserve_tee_time.py / diagnose_date_filter.py
+error_screenshot.png
+error_page_source.html
+date_mismatch_screenshot.png
+diag_*.png
+
 # C extensions
 *.so
 
