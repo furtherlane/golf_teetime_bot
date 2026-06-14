@@ -13,6 +13,7 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 from twocaptcha import TwoCaptcha
 
 from rich import print
@@ -101,25 +102,43 @@ def run():
         # parse and display tee time info
         course_select = driver.find_element(By.XPATH, "/html/body/div[2]/div/div[2]/div[1]/div/div[1]/div/select")
         course = course_select.find_element(By.XPATH, "option[@selected]").text
-        parts = first_tee_time.text.split("\n")
-        tee_time = parts[0] if len(parts) > 0 else "?"
-        holes_players = parts[2].split() if len(parts) > 2 else []
-        holes = holes_players[0] if len(holes_players) > 0 else "?"
-        players = holes_players[1] if len(holes_players) > 1 else "?"
 
-        print(f"\nFirst Available Tee Time:")
-        print(f"  Time:    {tee_time}")
-        print(f"  Course:  {course}")
-        print(f"  Holes:   {holes}")
-        print(f"  Players: {players}")
+        def print_tee_time_info(tee_time_element):
+            parts = tee_time_element.text.split("\n")
+            tee_time = parts[0] if len(parts) > 0 else "?"
+            holes_players = parts[2].split() if len(parts) > 2 else []
+            holes = holes_players[0] if len(holes_players) > 0 else "?"
+            players = holes_players[1] if len(holes_players) > 1 else "?"
+            print(f"\nFirst Available Tee Time:")
+            print(f"  Time:    {tee_time}")
+            print(f"  Course:  {course}")
+            print(f"  Holes:   {holes}")
+            print(f"  Players: {players}")
 
-        # click the tee time to open the booking modal
-        first_tee_time.click()
+        print_tee_time_info(first_tee_time)
+
+        # click the tee time to open the booking modal. Right around the 9pm release,
+        # #times can refresh out from under us, so if the modal doesn't open, re-read
+        # the current first available tee time and try again.
+        for attempt in range(3):
+            first_tee_time.click()
+            try:
+                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "book_time")))
+                break
+            except TimeoutException:
+                print(f"\nBooking modal didn't open (attempt {attempt + 1}/3) - tee times list may have refreshed. Retrying...")
+                first_tee_time = driver.find_element(By.CSS_SELECTOR, '#times > div > div:nth-child(1)')
+                if "no tee times available" in first_tee_time.text.lower():
+                    print("\nNo tee times available for this date with the current filters.")
+                    driver.close()
+                    return
+                print_tee_time_info(first_tee_time)
+        else:
+            raise TimeoutException("Booking modal did not open after 3 attempts")
 
         # verify the modal's date matches the calendar day we selected before booking anything.
         # If the selected day's tee times aren't released yet, #times can fall back to showing
         # a different date's availability while the calendar still shows our day as selected.
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "book_time")))
         modal_lines = driver.find_element(By.ID, "book_time").text.split("\n")
         try:
             modal_date_text = modal_lines[modal_lines.index("Date") + 1]
