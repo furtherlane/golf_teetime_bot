@@ -3,6 +3,7 @@ name: Book Tee Time
 on:
   schedule:
     - cron: '40 0 * * 6'  # ~20 min before Friday 9:00 PM ET; script waits for the exact moment (DST-aware)
+    - cron: '40 0 * * 1'  # TEMPORARY: ~20 min before Sunday 9:00 PM ET - real-booking validation run, remove once confirmed working
   workflow_dispatch:      # allows manual trigger for testing
     inputs:
       skip_wait:
