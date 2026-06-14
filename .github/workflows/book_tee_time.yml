@@ -19,6 +19,11 @@ on:
 jobs:
   book:
     runs-on: ubuntu-latest
+    env:
+      # The booking site's calendar computes "today" from the browser's clock/timezone.
+      # GitHub-hosted runners default to UTC, which can be a day ahead of the course's
+      # Eastern time in the evening, causing the calendar to show the wrong "last day".
+      TZ: America/New_York
 
     steps:
       - name: Checkout repo
