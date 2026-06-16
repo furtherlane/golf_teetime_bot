@@ -115,7 +115,10 @@ def run():
         def close_booking_modal():
             close_buttons = driver.find_elements(By.CSS_SELECTOR, "#book_time .close[data-dismiss='modal']")
             if close_buttons:
-                close_buttons[0].click()
+                try:
+                    close_buttons[0].click()
+                except Exception:
+                    pass  # modal may already be closing/closed
                 try:
                     WebDriverWait(driver, 5).until(EC.invisibility_of_element_located((By.ID, "book_time")))
                 except TimeoutException:
@@ -213,13 +216,14 @@ def run():
             else:
                 print("No CAPTCHA detected.")
 
-            # wait for confirmation
+            # wait for confirmation - use visibility conditions to avoid matching
+            # the always-present but hidden #login-error div (.alert-danger)
             try:
                 WebDriverWait(driver, 20).until(
                     EC.any_of(
                         EC.invisibility_of_element_located((By.ID, "book_time")),
-                        EC.presence_of_element_located((By.CSS_SELECTOR, ".alert-success")),
-                        EC.presence_of_element_located((By.CSS_SELECTOR, ".alert-danger")),
+                        EC.visibility_of_element_located((By.CSS_SELECTOR, ".alert-success")),
+                        EC.visibility_of_element_located((By.CSS_SELECTOR, ".alert-danger")),
                         EC.presence_of_element_located((By.CSS_SELECTOR, ".js-booking-confirmation")),
                         EC.url_contains("confirmation"),
                     )
@@ -232,7 +236,9 @@ def run():
 
             # if the booking was rejected (e.g. someone else grabbed this slot first),
             # close the modal and fall back to the next available tee time for this date.
-            danger_elements = driver.find_elements(By.CSS_SELECTOR, ".alert-danger")
+            # only count visible, non-empty danger alerts (ignore the hidden #login-error div)
+            danger_elements = [el for el in driver.find_elements(By.CSS_SELECTOR, ".alert-danger")
+                               if el.is_displayed() and el.text.strip()]
             if danger_elements:
                 print(f"\nBooking attempt rejected: {danger_elements[0].text}")
                 if booking_attempt < MAX_BOOKING_ATTEMPTS:
