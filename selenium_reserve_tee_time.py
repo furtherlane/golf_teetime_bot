@@ -54,12 +54,14 @@ def run():
         driver.find_element(By.XPATH, "/html/body/div[2]/div/div[2]/div/div/button[3]").click()
         print("Clicked booking class button.", flush=True)
 
-        # log in
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]")))
-        driver.find_element(By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]").click()
-        driver.find_element(By.XPATH, '//*[@id="login_email"]').send_keys(config["FOREUP_USERNAME"])
-        driver.find_element(By.XPATH, '//*[@id="login_password"]').send_keys(config["FOREUP_PASSWORD"])
-        driver.find_element(By.XPATH, "/html/body/div[3]/div/div/div[3]/div[1]/button[1]").click()
+        # log in - wait for the login modal to render after the booking class click,
+        # then fill credentials and submit. Use stable CSS/ID selectors so this
+        # works across all courses on the Essex County booking system.
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "login_email")))
+        driver.find_element(By.ID, "login_email").send_keys(config["FOREUP_USERNAME"])
+        driver.find_element(By.ID, "login_password").send_keys(config["FOREUP_PASSWORD"])
+        WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.login")))
+        driver.find_element(By.CSS_SELECTOR, "button.login").click()
         print("Logged in.", flush=True)
 
         # wait until exactly 9:00 PM Eastern before checking the calendar
