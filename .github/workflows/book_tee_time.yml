@@ -1,9 +1,7 @@
 name: Book Tee Time
 
 on:
-  schedule:
-    - cron: '40 0 * * 6'  # ~20 min before Friday 9:00 PM ET; script waits for the exact moment (DST-aware)
-  workflow_dispatch:      # allows manual trigger for testing
+  workflow_dispatch:      # manual trigger only - recurring booking runs via local launchd (more reliable than GH Actions schedule)
     inputs:
       skip_wait:
         description: 'Skip waiting until 9PM ET (for testing the rest of the flow now)'
