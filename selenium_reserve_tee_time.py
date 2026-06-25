@@ -1,6 +1,7 @@
 #!/Users/steve/apps/foreup-autores/.venv/bin/python3
 import os
 import re
+import subprocess
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -19,6 +20,22 @@ from twocaptcha import TwoCaptcha
 from rich import print
 
 config = dotenv_values(".env")
+
+
+def get_chrome_major_version():
+    """Detect the installed Chrome major version so uc downloads the matching ChromeDriver.
+    uc 3.5.5 has a bug where it downloads the latest ChromeDriver regardless of Chrome version."""
+    try:
+        out = subprocess.check_output(
+            ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--version"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        m = re.search(r"Chrome (\d+)", out)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
 
 
 def wait_until_eastern(hour, minute):
@@ -40,7 +57,9 @@ def run():
     print("Launching Chrome...", flush=True)
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
-    driver = uc.Chrome(options=options, headless=False)
+    chrome_major = get_chrome_major_version()
+    print(f"Detected Chrome major version: {chrome_major}", flush=True)
+    driver = uc.Chrome(options=options, headless=False, version_main=chrome_major)
     driver.set_page_load_timeout(60)
     print("Chrome launched.", flush=True)
 
