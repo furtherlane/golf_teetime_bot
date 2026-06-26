@@ -54,6 +54,12 @@ def wait_until_eastern(hour, minute):
 
 def run():
 
+    # Wait until 10 minutes before 9pm BEFORE launching Chrome.
+    # ForeUp's SPA auto-refreshes the page after ~15-20 minutes of inactivity and
+    # kicks the user back to the login modal — so we keep the browser session short.
+    if os.environ.get("SKIP_WAIT", "").lower() != "true":
+        wait_until_eastern(20, 50)
+
     print("Launching Chrome...", flush=True)
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
@@ -90,7 +96,7 @@ def run():
         if os.environ.get("SKIP_WAIT", "").lower() == "true":
             print("SKIP_WAIT is set, proceeding without waiting.", flush=True)
         else:
-            wait_until_eastern(21, 0)
+            wait_until_eastern(21, 0)  # only ~10 min remaining after login
 
         # wait for calendar and select the last available day
         # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)
