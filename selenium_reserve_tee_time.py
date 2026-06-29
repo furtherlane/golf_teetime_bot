@@ -54,11 +54,12 @@ def wait_until_eastern(hour, minute):
 
 def run():
 
-    # Wait until 10 minutes before 9pm BEFORE launching Chrome.
-    # ForeUp's SPA auto-refreshes the page after ~15-20 minutes of inactivity and
-    # kicks the user back to the login modal — so we keep the browser session short.
+    # Wait until 2 minutes before 9pm BEFORE launching Chrome.
+    # ForeUp's SPA fires a scheduled page refresh at exactly 9pm when new tee times
+    # are released, resetting the page to the login state. Login at 8:58pm so the
+    # browser session is fresh and we can handle the 9pm refresh immediately.
     if os.environ.get("SKIP_WAIT", "").lower() != "true":
-        wait_until_eastern(20, 50)
+        wait_until_eastern(20, 58)
 
     print("Launching Chrome...", flush=True)
     options = uc.ChromeOptions()
@@ -96,13 +97,26 @@ def run():
         if os.environ.get("SKIP_WAIT", "").lower() == "true":
             print("SKIP_WAIT is set, proceeding without waiting.", flush=True)
         else:
-            wait_until_eastern(21, 0)  # only ~10 min remaining after login
+            wait_until_eastern(21, 0)  # only ~2 min remaining after login
+            # ForeUp's SPA fires a scheduled refresh at exactly 9pm when new tee times
+            # are released, which resets the page to the login modal. Re-authenticate
+            # if the modal re-appeared so we can immediately access the fresh calendar.
+            time.sleep(3)
+            login_elements = driver.find_elements(By.ID, "login_email")
+            if login_elements and login_elements[0].is_displayed():
+                print("Page refreshed at 9pm - re-logging in...", flush=True)
+                login_elements[0].send_keys(config["FOREUP_USERNAME"])
+                driver.find_element(By.ID, "login_password").send_keys(config["FOREUP_PASSWORD"])
+                relogin_btn = driver.find_element(By.CSS_SELECTOR, "button.login")
+                driver.execute_script("arguments[0].click();", relogin_btn)
+                WebDriverWait(driver, 10).until(EC.invisibility_of_element_located((By.ID, "login_email")))
+                print("Re-logged in.", flush=True)
 
         # wait for calendar and select the last available day
         # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)
         # To test before 9PM EST, change calendar_day_list[-1] to calendar_day_list[-2]
         print("Waiting for calendar to load...")
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".datepicker-switch")))
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".datepicker-switch")))
         calendar_day_list = driver.find_elements(By.CSS_SELECTOR, ".day:not(.disabled)")
         print(f"Number of days available to reserve: {len(calendar_day_list)}")
 
