@@ -97,20 +97,33 @@ def run():
         if os.environ.get("SKIP_WAIT", "").lower() == "true":
             print("SKIP_WAIT is set, proceeding without waiting.", flush=True)
         else:
-            wait_until_eastern(21, 0)  # only ~2 min remaining after login
-            # ForeUp's SPA fires a scheduled refresh at exactly 9pm when new tee times
-            # are released, which resets the page to the login modal. Re-authenticate
-            # if the modal re-appeared so we can immediately access the fresh calendar.
-            time.sleep(3)
-            login_elements = driver.find_elements(By.ID, "login_email")
-            if login_elements and login_elements[0].is_displayed():
-                print("Page refreshed at 9pm - re-logging in...", flush=True)
-                login_elements[0].send_keys(config["FOREUP_USERNAME"])
+            wait_until_eastern(21, 0)
+            # ForeUp's SPA fires a hard refresh at exactly 9pm when new tee times are
+            # released, resetting the session. Rather than patching the mid-refresh DOM,
+            # do a clean page reload at 9pm — the same proven login flow runs again and
+            # lands us on a fresh calendar with just-released tee times (~20s cost).
+            print("9pm reached - reloading for fresh tee time data...", flush=True)
+            driver.get(config["FOREUP_SOFTWARE_URL"])
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div/div[2]/div/div/button[3]")))
+            booking_class_btn = driver.find_element(By.XPATH, "/html/body/div[2]/div/div[2]/div/div/button[3]")
+            driver.execute_script("arguments[0].click();", booking_class_btn)
+            print("Clicked booking class button (9pm reload).", flush=True)
+            # After reload, we may or may not need to log in again depending on cookie state.
+            # Wait for whichever comes first: login modal or calendar.
+            WebDriverWait(driver, 15).until(
+                EC.any_of(
+                    EC.visibility_of_element_located((By.ID, "login_email")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".datepicker-switch")),
+                )
+            )
+            login_check = driver.find_elements(By.ID, "login_email")
+            if login_check and login_check[0].is_displayed():
+                driver.find_element(By.ID, "login_email").send_keys(config["FOREUP_USERNAME"])
                 driver.find_element(By.ID, "login_password").send_keys(config["FOREUP_PASSWORD"])
-                relogin_btn = driver.find_element(By.CSS_SELECTOR, "button.login")
-                driver.execute_script("arguments[0].click();", relogin_btn)
-                WebDriverWait(driver, 10).until(EC.invisibility_of_element_located((By.ID, "login_email")))
-                print("Re-logged in.", flush=True)
+                WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.login")))
+                login_btn2 = driver.find_element(By.CSS_SELECTOR, "button.login")
+                driver.execute_script("arguments[0].click();", login_btn2)
+                print("Re-logged in after 9pm reload.", flush=True)
 
         # wait for calendar and select the last available day
         # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)
