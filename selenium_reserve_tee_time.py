@@ -65,6 +65,11 @@ def run():
     print("Launching Chrome...", flush=True)
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
+    # Prevent Chrome from killing "hung" renderers and backgrounding them when
+    # the script runs without a foreground user session (e.g. launchd context).
+    options.add_argument("--disable-hang-monitor")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--disable-backgrounding-occluded-windows")
     chrome_major = get_chrome_major_version()
     print(f"Detected Chrome major version: {chrome_major}", flush=True)
     driver = uc.Chrome(options=options, headless=False, version_main=chrome_major)
