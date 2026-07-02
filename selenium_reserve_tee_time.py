@@ -117,7 +117,7 @@ def run():
         last_available_day = calendar_day_list[-1]
         expected_day = last_available_day.text.strip()
         print(f"Selecting date: {expected_day}")
-        last_available_day.click()
+        driver.execute_script("arguments[0].click();", last_available_day)
 
         # filter to 1 player
         WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, '#nav > div > div:nth-child(3) > div > div > a:nth-child(1)')))
@@ -152,7 +152,7 @@ def run():
             close_buttons = driver.find_elements(By.CSS_SELECTOR, "#book_time .close[data-dismiss='modal']")
             if close_buttons:
                 try:
-                    close_buttons[0].click()
+                    driver.execute_script("arguments[0].click();", close_buttons[0])
                 except Exception:
                     pass  # modal may already be closing/closed
                 try:
@@ -179,7 +179,7 @@ def run():
             # #times can refresh out from under us, so if the modal doesn't open, re-read
             # the tee time at this position and try again.
             for attempt in range(3):
-                tee_time_element.click()
+                driver.execute_script("arguments[0].click();", tee_time_element)
                 try:
                     WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "book_time")))
                     break
@@ -223,11 +223,13 @@ def run():
 
             # select 1 player in the modal
             WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")))
-            driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active").click()
+            player_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")
+            driver.execute_script("arguments[0].click();", player_btn)
 
             # click Book Time
             WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")))
-            driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left").click()
+            book_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")
+            driver.execute_script("arguments[0].click();", book_btn)
             print("\nBook button clicked, checking for CAPTCHA...")
 
             # solve reCAPTCHA via 2captcha if it appears
