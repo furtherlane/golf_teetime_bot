@@ -14,7 +14,7 @@ import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 from twocaptcha import TwoCaptcha
 
 from rich import print
@@ -160,17 +160,31 @@ def run():
                 except TimeoutException:
                     pass
 
+        def get_tee_time_element(selector, retries=5):
+            """Find the tee time element at selector, retrying if the list is mid-refresh."""
+            for _ in range(retries):
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if not elements:
+                    return None
+                try:
+                    text = elements[0].text.lower()
+                    if "no tee times available" in text:
+                        return None
+                    return elements[0]
+                except StaleElementReferenceException:
+                    time.sleep(0.3)
+            return None
+
         # try tee times for this date in order. If a booking attempt is rejected because
         # the slot was grabbed by someone else in the meantime, fall back to the next
         # available tee time for this date (up to MAX_BOOKING_ATTEMPTS).
         for booking_attempt in range(1, MAX_BOOKING_ATTEMPTS + 1):
             tee_time_selector = f'#times > div > div:nth-child({booking_attempt})'
-            tee_time_elements = driver.find_elements(By.CSS_SELECTOR, tee_time_selector)
-            if not tee_time_elements or "no tee times available" in tee_time_elements[0].text.lower():
+            tee_time_element = get_tee_time_element(tee_time_selector)
+            if tee_time_element is None:
                 print("\nNo more tee times available for this date with the current filters.")
                 driver.close()
                 return
-            tee_time_element = tee_time_elements[0]
 
             label = "First Available Tee Time" if booking_attempt == 1 else f"Next Available Tee Time (attempt {booking_attempt}/{MAX_BOOKING_ATTEMPTS})"
             print_tee_time_info(tee_time_element, label)
@@ -185,12 +199,11 @@ def run():
                     break
                 except TimeoutException:
                     print(f"\nBooking modal didn't open (attempt {attempt + 1}/3) - tee times list may have refreshed. Retrying...")
-                    tee_time_elements = driver.find_elements(By.CSS_SELECTOR, tee_time_selector)
-                    if not tee_time_elements or "no tee times available" in tee_time_elements[0].text.lower():
+                    tee_time_element = get_tee_time_element(tee_time_selector)
+                    if tee_time_element is None:
                         print("\nNo tee times available for this date with the current filters.")
                         driver.close()
                         return
-                    tee_time_element = tee_time_elements[0]
                     print_tee_time_info(tee_time_element, label)
             else:
                 raise TimeoutException("Booking modal did not open after 3 attempts")
