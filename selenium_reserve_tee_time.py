@@ -17,7 +17,73 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 from twocaptcha import TwoCaptcha
 
-from rich import print
+_builtin_print = print
+
+def print(*args, **kwargs):
+    eastern = ZoneInfo("America/New_York")
+    ts = datetime.now(eastern).strftime("%H:%M:%S.%f")[:-3]
+    _builtin_print(f"[{ts}]", *args, **kwargs)
+
+
+def start_screen_recording():
+    """Start ffmpeg screen capture. Returns the subprocess or None if ffmpeg is unavailable."""
+    eastern = ZoneInfo("America/New_York")
+    ts = datetime.now(eastern).strftime("%Y-%m-%d_%H%M%S")
+    os.makedirs("recordings", exist_ok=True)
+    output = os.path.join("recordings", f"teetime_{ts}.mp4")
+    try:
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y",
+                "-f", "avfoundation",
+                "-capture_cursor", "1",
+                "-i", "1:none",
+                "-r", "15",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p",
+                output,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)  # give ffmpeg a moment to start
+        if proc.poll() is not None:
+            # ffmpeg exited immediately — try screen index 0
+            proc = subprocess.Popen(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "avfoundation",
+                    "-capture_cursor", "1",
+                    "-i", "0:none",
+                    "-r", "15",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    output,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1)
+        if proc.poll() is None:
+            print(f"Screen recording started: {output}")
+            return proc
+        print("Screen recording failed to start (ffmpeg exited immediately).")
+    except FileNotFoundError:
+        print("ffmpeg not found — skipping screen recording.")
+    return None
+
+
+def stop_screen_recording(proc):
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        print("Screen recording saved.")
+
 
 config = dotenv_values(".env")
 
@@ -62,19 +128,25 @@ def run():
     if os.environ.get("SKIP_WAIT", "").lower() != "true":
         wait_until_eastern(20, 59)
 
-    print("Launching Chrome...", flush=True)
-    options = uc.ChromeOptions()
-    options.add_argument("--window-size=1920,1080")
-    # Prevent Chrome from killing "hung" renderers and backgrounding them when
-    # the script runs without a foreground user session (e.g. launchd context).
-    options.add_argument("--disable-hang-monitor")
-    options.add_argument("--disable-renderer-backgrounding")
-    options.add_argument("--disable-backgrounding-occluded-windows")
-    chrome_major = get_chrome_major_version()
-    print(f"Detected Chrome major version: {chrome_major}", flush=True)
-    driver = uc.Chrome(options=options, headless=False, version_main=chrome_major)
-    driver.set_page_load_timeout(60)
-    print("Chrome launched.", flush=True)
+    ffmpeg_proc = start_screen_recording()
+
+    try:
+        print("Launching Chrome...", flush=True)
+        options = uc.ChromeOptions()
+        options.add_argument("--window-size=1920,1080")
+        # Prevent Chrome from killing "hung" renderers and backgrounding them when
+        # the script runs without a foreground user session (e.g. launchd context).
+        options.add_argument("--disable-hang-monitor")
+        options.add_argument("--disable-renderer-backgrounding")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        chrome_major = get_chrome_major_version()
+        print(f"Detected Chrome major version: {chrome_major}", flush=True)
+        driver = uc.Chrome(options=options, headless=False, version_main=chrome_major)
+        driver.set_page_load_timeout(60)
+        print("Chrome launched.", flush=True)
+    except Exception:
+        stop_screen_recording(ffmpeg_proc)
+        raise
 
     try:
         print(f"Loading {config['FOREUP_SOFTWARE_URL']}...", flush=True)
@@ -118,11 +190,6 @@ def run():
         expected_day = last_available_day.text.strip()
         print(f"Selecting date: {expected_day}")
         driver.execute_script("arguments[0].click();", last_available_day)
-
-        # filter to 1 player
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, '#nav > div > div:nth-child(3) > div > div > a:nth-child(1)')))
-        btn = driver.find_element(By.CSS_SELECTOR, '#nav > div > div:nth-child(3) > div > div > a:nth-child(1)')
-        driver.execute_script("arguments[0].click();", btn)
 
         # wait for tee times to load
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "times")))
@@ -234,11 +301,6 @@ def run():
                 driver.close()
                 return
 
-            # select 1 player in the modal
-            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")))
-            player_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-body.container-fluid > div.row.js-booking-players-row > div.col-sm-6.col-md-4.js-booking-players > div > a.btn.btn-primary.active")
-            driver.execute_script("arguments[0].click();", player_btn)
-
             # click Book Time
             WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")))
             book_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")
@@ -319,6 +381,8 @@ def run():
         with open("error_page_source.html", "w") as f:
             f.write(driver.page_source)
         raise
+    finally:
+        stop_screen_recording(ffmpeg_proc)
 
 
 if __name__ == "__main__":
