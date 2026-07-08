@@ -2,6 +2,7 @@
 import os
 import re
 import subprocess
+import threading
 import time
 import warnings
 warnings.filterwarnings("ignore")
@@ -156,6 +157,43 @@ def run():
         WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div/div[2]/div/div/button[3]")))
         print("Page pre-warmed. Waiting until 9pm to click booking class...", flush=True)
 
+        # reCAPTCHA pre-solve: submit the solve request now so the token is ready by
+        # the time we click Book Time (~60s from now). reCAPTCHA tokens are valid for
+        # 120s, so even a slow 2captcha response has plenty of time.
+        captcha_result = {}
+
+        def extract_site_key():
+            """Find reCAPTCHA site key in current page source."""
+            try:
+                m = re.search(r'data-sitekey=["\']([^"\']{30,})["\']', driver.page_source)
+                if m:
+                    return m.group(1)
+            except Exception:
+                pass
+            return None
+
+        def start_captcha_presolve(site_key):
+            def _solve():
+                try:
+                    print(f"CAPTCHA pre-solve started (site key: {site_key[:8]}...).")
+                    solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
+                    result = solver.recaptcha(sitekey=site_key, url=config["FOREUP_SOFTWARE_URL"], invisible=1)
+                    captcha_result["token"] = result["code"]
+                    print("CAPTCHA pre-solved and token ready.")
+                except Exception as e:
+                    captcha_result["error"] = str(e)
+                    print(f"CAPTCHA pre-solve failed: {e}")
+            t = threading.Thread(target=_solve, daemon=True)
+            t.start()
+            captcha_result["thread"] = t
+
+        site_key = extract_site_key()
+        if site_key:
+            print("Found reCAPTCHA site key in pre-warm page — starting background CAPTCHA solve.")
+            start_captcha_presolve(site_key)
+        else:
+            print("reCAPTCHA site key not in pre-warm page — will start solve after login.")
+
         # Wait until exactly 9pm, then click and login immediately.
         if os.environ.get("SKIP_WAIT", "").lower() == "true":
             print("SKIP_WAIT is set, proceeding without waiting.", flush=True)
@@ -177,6 +215,15 @@ def run():
         login_btn = driver.find_element(By.CSS_SELECTOR, "button.login")
         driver.execute_script("arguments[0].click();", login_btn)
         print("Logged in.", flush=True)
+
+        # If pre-solve didn't start during pre-warm, try now from the post-login page.
+        if "thread" not in captcha_result:
+            site_key = extract_site_key()
+            if site_key:
+                print("Found reCAPTCHA site key post-login — starting background CAPTCHA solve.")
+                start_captcha_presolve(site_key)
+            else:
+                print("reCAPTCHA site key not found post-login — will solve on-demand if CAPTCHA appears.")
 
         # wait for calendar and select the last available day
         # Note: for Essex County, tee times open 7 days in advance (14 days for Gold Members)
@@ -307,17 +354,31 @@ def run():
             driver.execute_script("arguments[0].click();", book_btn)
             print("\nBook button clicked, checking for CAPTCHA...")
 
-            # solve reCAPTCHA via 2captcha if it appears
-            time.sleep(2)
+            # Brief pause then check if CAPTCHA appeared.
+            time.sleep(0.5)
             recaptcha_elements = driver.find_elements(By.CSS_SELECTOR, ".g-recaptcha, iframe[src*='recaptcha']")
             if recaptcha_elements:
-                print("CAPTCHA detected, solving via 2captcha...")
-                site_key = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha").get_attribute("data-sitekey")
-                solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
-                result = solver.recaptcha(sitekey=site_key, url=driver.current_url, invisible=1)
-                captcha_token = result["code"]
-                print("CAPTCHA solved, injecting token...")
+                captcha_token = None
 
+                # Use the pre-solved token if available; otherwise wait for it or solve on-demand.
+                if "thread" in captcha_result:
+                    wait_start = time.time()
+                    captcha_result["thread"].join(timeout=45)
+                    elapsed = time.time() - wait_start
+                    if "token" in captcha_result:
+                        captcha_token = captcha_result["token"]
+                        print(f"CAPTCHA detected — using pre-solved token (waited {elapsed:.1f}s).")
+                    else:
+                        print(f"Pre-solve failed after {elapsed:.1f}s — solving on-demand...")
+
+                if captcha_token is None:
+                    print("CAPTCHA detected — solving via 2captcha on-demand...")
+                    site_key = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha").get_attribute("data-sitekey")
+                    solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
+                    result = solver.recaptcha(sitekey=site_key, url=driver.current_url, invisible=1)
+                    captcha_token = result["code"]
+
+                print("Injecting CAPTCHA token...")
                 driver.execute_script(f"""
                     document.querySelectorAll('[name="g-recaptcha-response"]').forEach(function(el) {{
                         el.value = "{captcha_token}";
