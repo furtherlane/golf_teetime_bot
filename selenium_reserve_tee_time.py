@@ -348,6 +348,11 @@ def run():
                 driver.close()
                 return
 
+            # select 1 player in the booking modal
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time .js-booking-players a.btn:first-child")))
+            player_btn = driver.find_element(By.CSS_SELECTOR, "#book_time .js-booking-players a.btn:first-child")
+            driver.execute_script("arguments[0].click();", player_btn)
+
             # click Book Time
             WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")))
             book_btn = driver.find_element(By.CSS_SELECTOR, "#book_time > div > div.modal-footer > button.btn.btn-success.js-book-button.pull-left")
@@ -360,23 +365,45 @@ def run():
             if recaptcha_elements:
                 captcha_token = None
 
-                # Use the pre-solved token if available; otherwise wait for it or solve on-demand.
-                if "thread" in captcha_result:
-                    wait_start = time.time()
-                    captcha_result["thread"].join(timeout=45)
-                    elapsed = time.time() - wait_start
-                    if "token" in captcha_result:
-                        captcha_token = captcha_result["token"]
-                        print(f"CAPTCHA detected — using pre-solved token (waited {elapsed:.1f}s).")
-                    else:
-                        print(f"Pre-solve failed after {elapsed:.1f}s — solving on-demand...")
+                if "token" in captcha_result:
+                    # Pre-solve already finished — use it immediately.
+                    captcha_token = captcha_result["token"]
+                    print("CAPTCHA detected — pre-solved token ready, injecting immediately.")
+                else:
+                    # Race pre-solve (if running) against a fresh on-demand solve.
+                    # Use whichever finishes first; 2captcha can be slow so this is
+                    # faster than waiting sequentially.
+                    on_demand = {}
+                    sk = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha").get_attribute("data-sitekey")
+                    current_url = driver.current_url
 
-                if captcha_token is None:
-                    print("CAPTCHA detected — solving via 2captcha on-demand...")
-                    site_key = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha").get_attribute("data-sitekey")
-                    solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
-                    result = solver.recaptcha(sitekey=site_key, url=driver.current_url, invisible=1)
-                    captcha_token = result["code"]
+                    def _on_demand_solve():
+                        try:
+                            solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
+                            result = solver.recaptcha(sitekey=sk, url=current_url, invisible=1)
+                            on_demand["token"] = result["code"]
+                            print("On-demand CAPTCHA solve finished.")
+                        except Exception as e:
+                            on_demand["error"] = str(e)
+
+                    on_demand_thread = threading.Thread(target=_on_demand_solve, daemon=True)
+                    on_demand_thread.start()
+                    print("CAPTCHA detected — racing pre-solve vs on-demand solve...")
+
+                    deadline = time.time() + 120
+                    while time.time() < deadline:
+                        if "token" in captcha_result:
+                            captcha_token = captcha_result["token"]
+                            print(f"Pre-solve won the race.")
+                            break
+                        if "token" in on_demand:
+                            captcha_token = on_demand["token"]
+                            print(f"On-demand solve won the race.")
+                            break
+                        time.sleep(0.25)
+
+                    if captcha_token is None:
+                        raise TimeoutException("Both CAPTCHA solve attempts timed out after 120s")
 
                 print("Injecting CAPTCHA token...")
                 driver.execute_script(f"""
