@@ -306,13 +306,19 @@ def run():
             # click the tee time to open the booking modal. Right around the 9pm release,
             # #times can refresh out from under us, so if the modal doesn't open, re-read
             # the tee time at this position and try again.
-            for attempt in range(3):
+            for attempt in range(5):
+                # Wait for the element to be clickable before firing — ForeUp's click
+                # handler is inactive while the tee times list is mid-refresh at 9pm.
+                try:
+                    WebDriverWait(driver, 3).until(EC.element_to_be_clickable((By.CSS_SELECTOR, tee_time_selector)))
+                except TimeoutException:
+                    pass  # proceed anyway; element may still respond to JS click
                 driver.execute_script("arguments[0].click();", tee_time_element)
                 try:
-                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "book_time")))
+                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "book_time")))
                     break
                 except TimeoutException:
-                    print(f"\nBooking modal didn't open (attempt {attempt + 1}/3) - tee times list may have refreshed. Retrying...")
+                    print(f"\nBooking modal didn't open (attempt {attempt + 1}/5) - tee times list may have refreshed. Retrying...")
                     tee_time_element = get_tee_time_element(tee_time_selector)
                     if tee_time_element is None:
                         print("\nNo tee times available for this date with the current filters.")
@@ -320,7 +326,7 @@ def run():
                         return
                     print_tee_time_info(tee_time_element, label)
             else:
-                raise TimeoutException("Booking modal did not open after 3 attempts")
+                raise TimeoutException("Booking modal did not open after 5 attempts")
 
             # verify the modal's date matches the calendar day we selected before booking anything.
             # If the selected day's tee times aren't released yet, #times can fall back to showing
