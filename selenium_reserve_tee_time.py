@@ -33,9 +33,10 @@ def start_screen_recording():
     os.makedirs("recordings", exist_ok=True)
     output = os.path.join("recordings", f"teetime_{ts}.mp4")
     try:
+        ffmpeg_bin = "/usr/local/bin/ffmpeg"
         proc = subprocess.Popen(
             [
-                "ffmpeg", "-y",
+                ffmpeg_bin, "-y",
                 "-f", "avfoundation",
                 "-capture_cursor", "1",
                 "-i", "1:none",
@@ -53,7 +54,7 @@ def start_screen_recording():
             # ffmpeg exited immediately — try screen index 0
             proc = subprocess.Popen(
                 [
-                    "ffmpeg", "-y",
+                    ffmpeg_bin, "-y",
                     "-f", "avfoundation",
                     "-capture_cursor", "1",
                     "-i", "0:none",
@@ -71,8 +72,8 @@ def start_screen_recording():
             print(f"Screen recording started: {output}")
             return proc
         print("Screen recording failed to start (ffmpeg exited immediately).")
-    except FileNotFoundError:
-        print("ffmpeg not found — skipping screen recording.")
+    except (FileNotFoundError, PermissionError):
+        print(f"ffmpeg not available at {ffmpeg_bin} — skipping screen recording.")
     return None
 
 
@@ -238,11 +239,15 @@ def run():
         print(f"Selecting date: {expected_day}")
         driver.execute_script("arguments[0].click();", last_available_day)
 
-        # wait for tee times to load
+        # wait for tee times to load, then pause briefly for ForeUp's release
+        # processing to settle. At exactly 9pm, ForeUp's SPA is mid-refresh
+        # and click handlers don't respond until the release cycle completes.
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "times")))
         WebDriverWait(driver, 20).until(
             lambda d: d.find_element(By.CSS_SELECTOR, '#times > div').text != "Loading Tee times..."
         )
+        print("Tee times loaded. Waiting 5s for ForeUp release cycle to settle...")
+        time.sleep(5)
 
         MAX_BOOKING_ATTEMPTS = 3
 
