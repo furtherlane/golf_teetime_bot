@@ -120,7 +120,36 @@ def wait_until_eastern(hour, minute):
     print("Target time reached.")
 
 
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teetime.lock")
+
+
+def acquire_lock():
+    """Write a PID lock file. Exit immediately if another instance is already running."""
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE) as f:
+                existing_pid = int(f.read().strip())
+            # Check if that process is still alive (signal 0 = existence check)
+            os.kill(existing_pid, 0)
+            print(f"Another instance is already running (PID {existing_pid}). Exiting to avoid double-booking.")
+            raise SystemExit(1)
+        except (ValueError, ProcessLookupError, PermissionError):
+            # Stale lock — process is dead, safe to overwrite
+            print(f"Stale lock file found — overwriting.")
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def release_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except FileNotFoundError:
+        pass
+
+
 def run():
+
+    acquire_lock()
 
     # Pre-warm Chrome 1 minute before 9pm: load the page and sit on the booking
     # class selection screen WITHOUT logging in. ForeUp resets the session at
@@ -148,6 +177,7 @@ def run():
         print("Chrome launched.", flush=True)
     except Exception:
         stop_screen_recording(ffmpeg_proc)
+        release_lock()
         raise
 
     try:
@@ -482,6 +512,7 @@ def run():
         raise
     finally:
         stop_screen_recording(ffmpeg_proc)
+        release_lock()
 
 
 if __name__ == "__main__":
