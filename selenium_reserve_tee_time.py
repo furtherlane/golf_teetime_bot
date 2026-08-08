@@ -29,6 +29,8 @@ RECAPTCHA_SITE_KEY = "6Le0bf4pAAAAALufPGSllYP0-QN79MW_XTUa-24h"
 BASE_URL           = "https://foreupsoftware.com"
 BOOKING_PAGE       = f"{BASE_URL}/index.php/booking/{COURSE_ID}/{SCHEDULE_ID}"
 
+NUM_PARALLEL = 3   # number of parallel CAPTCHA pre-solves and booking attempts
+
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teetime.lock")
 config    = dotenv_values(".env")
 DRY_RUN   = os.environ.get("DRY_RUN",   "").lower() == "true"
@@ -38,11 +40,13 @@ SKIP_WAIT = os.environ.get("SKIP_WAIT", "").lower() == "true"
 # Timestamped print
 # ---------------------------------------------------------------------------
 _builtin_print = print
+_print_lock = threading.Lock()
 
 def print(*args, **kwargs):
     eastern = ZoneInfo("America/New_York")
     ts = datetime.now(eastern).strftime("%H:%M:%S.%f")[:-3]
-    _builtin_print(f"[{ts}]", *args, **kwargs)
+    with _print_lock:
+        _builtin_print(f"[{ts}]", *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +105,7 @@ def wait_until_eastern(hour, minute):
 
 
 # ---------------------------------------------------------------------------
-# Lock file (prevents double-booking from simultaneous invocations)
+# Lock file
 # ---------------------------------------------------------------------------
 def acquire_lock():
     if os.path.exists(LOCK_FILE):
@@ -109,7 +113,7 @@ def acquire_lock():
             with open(LOCK_FILE) as f:
                 existing_pid = int(f.read().strip())
             os.kill(existing_pid, 0)
-            print(f"Another instance is already running (PID {existing_pid}). Exiting to avoid double-booking.")
+            print(f"Another instance is already running (PID {existing_pid}). Exiting.")
             raise SystemExit(1)
         except (ValueError, ProcessLookupError, PermissionError):
             print("Stale lock file found — overwriting.")
@@ -125,6 +129,24 @@ def release_lock():
 
 
 # ---------------------------------------------------------------------------
+# Build a session carrying the JWT for a given thread
+# ---------------------------------------------------------------------------
+def make_session(jwt_token):
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent":           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/149.0.0.0 Safari/537.36",
+        "X-Requested-With":     "XMLHttpRequest",
+        "X-Fu-Golfer-Location": "foreup",
+        "Origin":               BASE_URL,
+        "Referer":              BOOKING_PAGE,
+        "X-Authorization":      f"Bearer {jwt_token}",
+    })
+    return s
+
+
+# ---------------------------------------------------------------------------
 # Main booking flow
 # ---------------------------------------------------------------------------
 def run():
@@ -132,9 +154,16 @@ def run():
     ffmpeg_proc = start_screen_recording()
 
     try:
-        # Build a persistent session that automatically carries cookies and JWT.
-        session = requests.Session()
-        session.headers.update({
+        # ----------------------------------------------------------------
+        # 8:59 pm — login and start parallel CAPTCHA pre-solves
+        # ----------------------------------------------------------------
+        if not SKIP_WAIT:
+            wait_until_eastern(20, 59)
+
+        print("Initialising session...")
+        # Use a plain session for login — X-Authorization not set yet.
+        login_session = requests.Session()
+        login_session.headers.update({
             "User-Agent":           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                                     "Chrome/149.0.0.0 Safari/537.36",
@@ -143,20 +172,10 @@ def run():
             "Origin":               BASE_URL,
             "Referer":              BOOKING_PAGE,
         })
-
-        # ----------------------------------------------------------------
-        # 8:59 pm — establish session + login
-        # (No need to wait until 9pm to login; the server session persists
-        #  across the 9pm SPA reset that plagued the old browser approach.)
-        # ----------------------------------------------------------------
-        if not SKIP_WAIT:
-            wait_until_eastern(20, 59)
-
-        print("Initialising session...")
-        session.get(BOOKING_PAGE, timeout=15)
+        login_session.get(BOOKING_PAGE, timeout=15)
 
         print("Logging in via API...")
-        resp = session.post(
+        resp = login_session.post(
             f"{BASE_URL}/index.php/api/booking/users/login",
             data={
                 "username":         config["FOREUP_USERNAME"],
@@ -173,35 +192,34 @@ def run():
             raise RuntimeError(f"Login failed: {resp.text[:300]}")
 
         jwt_token = user["jwt"]
-        session.headers["X-Authorization"] = f"Bearer {jwt_token}"
         print(f"Logged in (person_id={user['person_id']}).")
 
-        # ----------------------------------------------------------------
-        # Start CAPTCHA pre-solve immediately after login so the token is
-        # ready well before we need it at booking time (~60s later).
-        # ----------------------------------------------------------------
-        captcha_result = {}
+        # Pre-solve NUM_PARALLEL CAPTCHA tokens in parallel so they're all
+        # ready by 9pm. Each parallel booking attempt gets its own token.
+        captcha_tokens = {}
 
-        def solve_captcha():
+        def solve_captcha(idx):
             try:
-                print("CAPTCHA pre-solve started (invisible reCAPTCHA)...")
+                print(f"CAPTCHA pre-solve {idx + 1}/{NUM_PARALLEL} started...")
                 solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
                 result = solver.recaptcha(
                     sitekey=RECAPTCHA_SITE_KEY,
                     url=BOOKING_PAGE,
                     invisible=1,
                 )
-                captcha_result["token"] = result["code"]
-                print("CAPTCHA pre-solved and ready.")
+                captcha_tokens[idx] = result["code"]
+                print(f"CAPTCHA pre-solve {idx + 1}/{NUM_PARALLEL} ready.")
             except Exception as e:
-                captcha_result["error"] = str(e)
-                print(f"CAPTCHA pre-solve failed: {e}")
+                print(f"CAPTCHA pre-solve {idx + 1}/{NUM_PARALLEL} failed: {e}")
 
-        captcha_thread = threading.Thread(target=solve_captcha, daemon=True)
-        captcha_thread.start()
+        captcha_threads = []
+        for i in range(NUM_PARALLEL):
+            t = threading.Thread(target=solve_captcha, args=(i,), daemon=True)
+            t.start()
+            captcha_threads.append(t)
 
         # ----------------------------------------------------------------
-        # 9:00 pm — poll tee times API until target date's slots appear
+        # 9:00 pm — poll aggressively for up to 10s, preferring morning slots
         # ----------------------------------------------------------------
         if not SKIP_WAIT:
             wait_until_eastern(21, 0)
@@ -211,147 +229,129 @@ def run():
         target_date_str = target_date.strftime("%m-%d-%Y")
         print(f"Polling tee times for {target_date_str}...")
 
-        tee_times = []
-        for attempt in range(60):
-            params = [
-                ("time",          "all"),
-                ("date",          target_date_str),
-                ("holes",         "18"),
-                ("players",       "1"),
-                ("booking_class", BOOKING_CLASS_ID),
-                ("schedule_id",   SCHEDULE_ID),
-                ("specials_only", "0"),
-                ("api_key",       ""),
-            ]
-            for sid in SCHEDULE_IDS:
-                params.append(("schedule_ids[]", sid))
+        poll_session = make_session(jwt_token)
+        poll_params = [
+            ("time",          "all"),
+            ("date",          target_date_str),
+            ("holes",         "18"),
+            ("players",       "1"),
+            ("booking_class", BOOKING_CLASS_ID),
+            ("schedule_id",   SCHEDULE_ID),
+            ("specials_only", "0"),
+            ("api_key",       ""),
+        ]
+        for sid in SCHEDULE_IDS:
+            poll_params.append(("schedule_ids[]", sid))
 
+        best_tee_times = []
+        poll_deadline = time.time() + 10  # poll for up to 10s looking for morning slots
+        poll_attempt = 0
+        while time.time() < poll_deadline:
+            poll_attempt += 1
             try:
-                resp = session.get(
+                resp = poll_session.get(
                     f"{BASE_URL}/index.php/api/booking/times",
-                    params=params,
-                    timeout=10,
+                    params=poll_params,
+                    timeout=5,
                 )
                 data = resp.json() if resp.ok else []
             except Exception as e:
-                print(f"Tee times poll error (attempt {attempt + 1}): {e}")
+                print(f"Poll error (attempt {poll_attempt}): {e}")
                 data = []
 
             if isinstance(data, list) and data:
-                tee_times = data
-                print(f"Got {len(tee_times)} tee times (attempt {attempt + 1}).")
-                break
+                data.sort(key=lambda t: t["time"])
+                morning = [t for t in data if int(t["time"].split()[1].split(":")[0]) < 10]
+                print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am.")
+                if morning:
+                    best_tee_times = data  # found morning slots — use them
+                    break
+                elif not best_tee_times:
+                    best_tee_times = data  # keep afternoon as fallback
+            time.sleep(0.25)
 
-            time.sleep(1)
+        if not best_tee_times:
+            raise RuntimeError(f"No tee times for {target_date_str} after 10s of polling.")
 
-        if not tee_times:
-            raise RuntimeError(f"No tee times for {target_date_str} after 60s of polling.")
+        early = [t for t in best_tee_times if int(t["time"].split()[1].split(":")[0]) < 10]
+        candidates = (early if early else best_tee_times)[:NUM_PARALLEL]
+        print(f"Candidates: {[t['time'] for t in candidates]}")
 
-        # Sort chronologically; prefer slots before 10am.
-        tee_times.sort(key=lambda t: t["time"])
-        early = [t for t in tee_times if int(t["time"].split()[1].split(":")[0]) < 10]
-        candidates = early if early else tee_times
+        if DRY_RUN:
+            for i, t in enumerate(candidates):
+                print(f"DRY_RUN — would attempt: {t['time']} @ {t['course_name']} (${t['green_fee']})")
+            return
 
-        print(f"Times before 10am: {[t['time'] for t in early] or 'none'}")
+        # ----------------------------------------------------------------
+        # Book candidates in parallel — each gets its own session + CAPTCHA token.
+        # First confirmed booking wins; others are abandoned.
+        # ----------------------------------------------------------------
+        booking_winner = {}
+        winner_lock = threading.Lock()
 
-        # Try each candidate in order; fall back if a slot is taken.
-        MAX_BOOKING_ATTEMPTS = 3
-
-        for booking_attempt, tee_time in enumerate(candidates[:MAX_BOOKING_ATTEMPTS], 1):
-            print(f"\n--- Booking attempt {booking_attempt}/{MAX_BOOKING_ATTEMPTS} ---")
-            print(f"  Time:    {tee_time['time']}")
-            print(f"  Course:  {tee_time['course_name']}")
-            print(f"  Holes:   18")
-            print(f"  Fee:     ${tee_time['green_fee']}")
-            print(f"  Spots:   {tee_time['available_spots']}")
-
-            if DRY_RUN:
-                print("DRY_RUN set — stopping before booking.")
+        def attempt_booking(idx, tee_time):
+            label = f"[slot {idx + 1}]"
+            print(f"{label} Waiting for CAPTCHA token...")
+            captcha_threads[idx].join(timeout=120)
+            captchaid = captcha_tokens.get(idx)
+            if not captchaid:
+                print(f"{label} No CAPTCHA token available — skipping.")
                 return
 
-            # POST pending_reservation to atomically hold the slot.
-            print("Claiming slot (pending reservation)...")
-            resp = session.post(
-                f"{BASE_URL}/index.php/api/booking/pending_reservation",
-                data={
-                    "time":                       tee_time["time"],
-                    "holes":                      "18",
-                    "players":                    "1",
-                    "carts":                      "false",
-                    "schedule_id":                str(tee_time["schedule_id"]),
-                    "teesheet_side_id":           str(tee_time["teesheet_side_id"]),
-                    "course_id":                  str(tee_time["course_id"]),
-                    "booking_class_id":           str(tee_time["booking_class_id"]),
-                    "duration":                   "1",
-                    "foreup_discount":            "false",
-                    "foreup_trade_discount_rate": str(tee_time.get("foreup_trade_discount_rate", 0)),
-                    "trade_min_players":          str(tee_time.get("trade_min_players", 0)),
-                    "cart_fee":                   str(tee_time["cart_fee"]),
-                    "cart_fee_tax":               str(tee_time["cart_fee_tax"]),
-                    "green_fee":                  str(tee_time["green_fee"]),
-                    "green_fee_tax":              str(tee_time["green_fee_tax"]),
-                },
-                timeout=15,
-            )
-            pending = resp.json()
-            if not pending.get("success"):
-                print(f"Slot unavailable (pending_reservation rejected): {resp.text[:200]}")
-                print("Trying next available tee time...")
-                continue
-            reservation_id = pending["reservation_id"]
-            print(f"Slot held (reservation_id={reservation_id}).")
+            # Check if another thread already won before we even start.
+            with winner_lock:
+                if booking_winner:
+                    return
 
-            # Wait for CAPTCHA token (should already be ready from pre-solve).
-            print("Waiting for CAPTCHA token...")
-            captcha_thread.join(timeout=120)
-            captchaid = captcha_result.get("token")
-            if not captchaid:
-                raise RuntimeError(f"CAPTCHA token unavailable: {captcha_result.get('error', 'timeout')}")
-
-            # Build booking payload from the tee time object + our overrides.
             booking_body = {
                 **tee_time,
                 "holes":     "18",
                 "players":   1,
                 "captchaid": captchaid,
             }
-
-            # Validate.
-            print("Validating booking...")
-            resp = session.post(
-                f"{BASE_URL}/index.php/api/booking/users/reservations",
-                json={**booking_body, "validate_only": True},
-                timeout=15,
-            )
-            validation = resp.json()
-            if not validation.get("valid"):
-                print(f"Validation failed: {resp.text[:300]}")
-                print("Trying next available tee time...")
-                continue
-
-            # Confirm.
-            print("Confirming booking...")
-            resp = session.post(
-                f"{BASE_URL}/index.php/api/booking/users/reservations",
-                json=booking_body,
-                timeout=15,
-            )
-            result = resp.json()
-
-            if "teetime_id" in result:
-                print(f"\nBooking completed successfully!")
-                print(f"  Tee time:  {result.get('reservation_time')}")
-                print(f"  Date/time: {result.get('time')}")
-                print(f"  Course:    {result.get('course_name')}")
-                print(f"  Players:   {result.get('player_count')}")
-                print(f"  Details:   {result.get('details')}")
-                time.sleep(10)
+            print(f"{label} Submitting booking for {tee_time['time']}...")
+            try:
+                thread_session = make_session(jwt_token)
+                resp = thread_session.post(
+                    f"{BASE_URL}/index.php/api/booking/users/reservations",
+                    json=booking_body,
+                    timeout=15,
+                )
+                result = resp.json()
+            except Exception as e:
+                print(f"{label} Request failed: {e}")
                 return
 
-            print(f"Booking rejected: {resp.text[:300]}")
-            print("Trying next available tee time...")
+            if "teetime_id" in result:
+                with winner_lock:
+                    if not booking_winner:
+                        booking_winner["result"] = result
+                        booking_winner["tee_time"] = tee_time
+                        print(f"{label} Booking succeeded!")
+            else:
+                print(f"{label} Rejected: {resp.text[:200]}")
 
-        print(f"\nGiving up after {MAX_BOOKING_ATTEMPTS} attempts.")
+        booking_threads = [
+            threading.Thread(target=attempt_booking, args=(i, tt), daemon=True)
+            for i, tt in enumerate(candidates)
+        ]
+        for t in booking_threads:
+            t.start()
+        for t in booking_threads:
+            t.join(timeout=130)
+
+        if booking_winner:
+            result   = booking_winner["result"]
+            tee_time = booking_winner["tee_time"]
+            print(f"\nBooking completed successfully!")
+            print(f"  Tee time:  {result.get('reservation_time')}")
+            print(f"  Date/time: {result.get('time')}")
+            print(f"  Course:    {result.get('course_name')}")
+            print(f"  Players:   {result.get('player_count')}")
+            print(f"  Details:   {result.get('details')}")
+            time.sleep(10)
+        else:
+            print(f"\nAll {len(candidates)} booking attempts failed.")
 
     except Exception:
         print("\nError occurred.", flush=True)
