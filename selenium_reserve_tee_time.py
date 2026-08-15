@@ -1,10 +1,10 @@
 #!/Users/steve/apps/foreup-autores/.venv/bin/python3
 """
 ForeUp tee time booking bot — pure HTTP API (no browser/Selenium).
-Logs in at 8:59pm via REST API, polls for tee times at 9pm, books the earliest slot.
+Logs in at 8:59pm, polls for tee times at 9pm, books the earliest slot.
+CAPTCHA is not enforced server-side, so we skip it entirely and book instantly.
 """
 import os
-import re
 import subprocess
 import threading
 import time
@@ -16,20 +16,18 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import dotenv_values
-from twocaptcha import TwoCaptcha
 
 # ---------------------------------------------------------------------------
 # ForeUp constants (from HAR analysis 2026-08-02)
 # ---------------------------------------------------------------------------
-COURSE_ID          = "22528"
-SCHEDULE_ID        = "11078"   # Francis A. Byrne Golf Course
-SCHEDULE_IDS       = ["11078", "11075", "13190", "11077"]  # all Essex County teesheets
-BOOKING_CLASS_ID   = "49773"   # Gold Cardholders
-RECAPTCHA_SITE_KEY = "6Le0bf4pAAAAALufPGSllYP0-QN79MW_XTUa-24h"
-BASE_URL           = "https://foreupsoftware.com"
-BOOKING_PAGE       = f"{BASE_URL}/index.php/booking/{COURSE_ID}/{SCHEDULE_ID}"
+COURSE_ID        = "22528"
+SCHEDULE_ID      = "11078"   # Francis A. Byrne Golf Course
+SCHEDULE_IDS     = ["11078", "11075", "13190", "11077"]  # all Essex County teesheets
+BOOKING_CLASS_ID = "49773"   # Gold Cardholders
+BASE_URL         = "https://foreupsoftware.com"
+BOOKING_PAGE     = f"{BASE_URL}/index.php/booking/{COURSE_ID}/{SCHEDULE_ID}"
 
-NUM_PARALLEL = 3   # number of parallel CAPTCHA pre-solves and booking attempts
+NUM_PARALLEL = 3   # number of simultaneous booking attempts
 
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teetime.lock")
 config    = dotenv_values(".env")
@@ -129,11 +127,11 @@ def release_lock():
 
 
 # ---------------------------------------------------------------------------
-# Build a session carrying the JWT for a given thread
+# Build a session carrying the JWT
 # ---------------------------------------------------------------------------
-def make_session(jwt_token):
+def make_session(jwt_token=""):
     s = requests.Session()
-    s.headers.update({
+    headers = {
         "User-Agent":           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                                 "Chrome/149.0.0.0 Safari/537.36",
@@ -141,8 +139,10 @@ def make_session(jwt_token):
         "X-Fu-Golfer-Location": "foreup",
         "Origin":               BASE_URL,
         "Referer":              BOOKING_PAGE,
-        "X-Authorization":      f"Bearer {jwt_token}",
-    })
+    }
+    if jwt_token:
+        headers["X-Authorization"] = f"Bearer {jwt_token}"
+    s.headers.update(headers)
     return s
 
 
@@ -155,23 +155,13 @@ def run():
 
     try:
         # ----------------------------------------------------------------
-        # 8:59 pm — login and start parallel CAPTCHA pre-solves
+        # 8:59 pm — login
         # ----------------------------------------------------------------
         if not SKIP_WAIT:
             wait_until_eastern(20, 59)
 
         print("Initialising session...")
-        # Use a plain session for login — X-Authorization not set yet.
-        login_session = requests.Session()
-        login_session.headers.update({
-            "User-Agent":           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    "Chrome/149.0.0.0 Safari/537.36",
-            "X-Requested-With":     "XMLHttpRequest",
-            "X-Fu-Golfer-Location": "foreup",
-            "Origin":               BASE_URL,
-            "Referer":              BOOKING_PAGE,
-        })
+        login_session = make_session()
         login_session.get(BOOKING_PAGE, timeout=15)
 
         print("Logging in via API...")
@@ -193,30 +183,6 @@ def run():
 
         jwt_token = user["jwt"]
         print(f"Logged in (person_id={user['person_id']}).")
-
-        # Pre-solve NUM_PARALLEL CAPTCHA tokens in parallel so they're all
-        # ready by 9pm. Each parallel booking attempt gets its own token.
-        captcha_tokens = {}
-
-        def solve_captcha(idx):
-            try:
-                print(f"CAPTCHA pre-solve {idx + 1}/{NUM_PARALLEL} started...")
-                solver = TwoCaptcha(config["TWOCAPTCHA_API_KEY"])
-                result = solver.recaptcha(
-                    sitekey=RECAPTCHA_SITE_KEY,
-                    url=BOOKING_PAGE,
-                    invisible=1,
-                )
-                captcha_tokens[idx] = result["code"]
-                print(f"CAPTCHA pre-solve {idx + 1}/{NUM_PARALLEL} ready.")
-            except Exception as e:
-                print(f"CAPTCHA pre-solve {idx + 1}/{NUM_PARALLEL} failed: {e}")
-
-        captcha_threads = []
-        for i in range(NUM_PARALLEL):
-            t = threading.Thread(target=solve_captcha, args=(i,), daemon=True)
-            t.start()
-            captcha_threads.append(t)
 
         # ----------------------------------------------------------------
         # 9:00 pm — poll aggressively for up to 10s, preferring morning slots
@@ -244,7 +210,7 @@ def run():
             poll_params.append(("schedule_ids[]", sid))
 
         best_tee_times = []
-        poll_deadline = time.time() + 10  # poll for up to 10s looking for morning slots
+        poll_deadline = time.time() + 10
         poll_attempt = 0
         while time.time() < poll_deadline:
             poll_attempt += 1
@@ -264,11 +230,11 @@ def run():
                 morning = [t for t in data if int(t["time"].split()[1].split(":")[0]) < 10]
                 print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am.")
                 if morning:
-                    best_tee_times = data  # found morning slots — use them
+                    best_tee_times = data
                     break
                 elif not best_tee_times:
-                    best_tee_times = data  # keep afternoon as fallback
-            time.sleep(0.25)
+                    best_tee_times = data
+            time.sleep(0.1)  # tighter polling now that we're not waiting for CAPTCHA
 
         if not best_tee_times:
             raise RuntimeError(f"No tee times for {target_date_str} after 10s of polling.")
@@ -278,39 +244,27 @@ def run():
         print(f"Candidates: {[t['time'] for t in candidates]}")
 
         if DRY_RUN:
-            for i, t in enumerate(candidates):
+            for t in candidates:
                 print(f"DRY_RUN — would attempt: {t['time']} @ {t['course_name']} (${t['green_fee']})")
             return
 
         # ----------------------------------------------------------------
-        # Book candidates — CAPTCHA tokens are pre-solved in parallel so all
-        # are ready instantly, but submissions are serialized behind a lock so
-        # only one booking fires at a time. If it succeeds, the others skip.
-        # If it's rejected, the next one fires immediately.
+        # Book candidates — no CAPTCHA wait needed (not enforced server-side).
+        # Submissions are serialized: if slot 1 succeeds, slot 2 skips.
+        # If slot 1 is rejected, slot 2 fires immediately.
         # ----------------------------------------------------------------
         booking_winner = {}
         winner_lock = threading.Lock()
-        submit_lock = threading.Lock()  # prevents simultaneous submissions
+        submit_lock = threading.Lock()
 
         def attempt_booking(idx, tee_time):
             label = f"[slot {idx + 1}]"
-            print(f"{label} Waiting for CAPTCHA token...")
-            captcha_threads[idx].join(timeout=120)
-            captchaid = captcha_tokens.get(idx)
-            if not captchaid:
-                print(f"{label} No CAPTCHA token available — skipping.")
-                return
-
             booking_body = {
                 **tee_time,
                 "holes":     "18",
                 "players":   1,
-                "captchaid": captchaid,
+                "captchaid": "0",  # not enforced server-side
             }
-
-            # Serialize submissions: acquire lock, re-check winner, then submit.
-            # This ensures that if slot 1 and slot 2 tokens arrive simultaneously,
-            # only one HTTP request fires at a time — preventing double bookings.
             with submit_lock:
                 with winner_lock:
                     if booking_winner:
@@ -344,11 +298,10 @@ def run():
         for t in booking_threads:
             t.start()
         for t in booking_threads:
-            t.join(timeout=130)
+            t.join(timeout=30)
 
         if booking_winner:
-            result   = booking_winner["result"]
-            tee_time = booking_winner["tee_time"]
+            result = booking_winner["result"]
             print(f"\nBooking completed successfully!")
             print(f"  Tee time:  {result.get('reservation_time')}")
             print(f"  Date/time: {result.get('time')}")
