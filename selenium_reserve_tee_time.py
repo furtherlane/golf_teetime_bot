@@ -283,11 +283,14 @@ def run():
             return
 
         # ----------------------------------------------------------------
-        # Book candidates in parallel — each gets its own session + CAPTCHA token.
-        # First confirmed booking wins; others are abandoned.
+        # Book candidates — CAPTCHA tokens are pre-solved in parallel so all
+        # are ready instantly, but submissions are serialized behind a lock so
+        # only one booking fires at a time. If it succeeds, the others skip.
+        # If it's rejected, the next one fires immediately.
         # ----------------------------------------------------------------
         booking_winner = {}
         winner_lock = threading.Lock()
+        submit_lock = threading.Lock()  # prevents simultaneous submissions
 
         def attempt_booking(idx, tee_time):
             label = f"[slot {idx + 1}]"
@@ -298,29 +301,32 @@ def run():
                 print(f"{label} No CAPTCHA token available — skipping.")
                 return
 
-            # Check if another thread already won before we even start.
-            with winner_lock:
-                if booking_winner:
-                    return
-
             booking_body = {
                 **tee_time,
                 "holes":     "18",
                 "players":   1,
                 "captchaid": captchaid,
             }
-            print(f"{label} Submitting booking for {tee_time['time']}...")
-            try:
-                thread_session = make_session(jwt_token)
-                resp = thread_session.post(
-                    f"{BASE_URL}/index.php/api/booking/users/reservations",
-                    json=booking_body,
-                    timeout=15,
-                )
-                result = resp.json()
-            except Exception as e:
-                print(f"{label} Request failed: {e}")
-                return
+
+            # Serialize submissions: acquire lock, re-check winner, then submit.
+            # This ensures that if slot 1 and slot 2 tokens arrive simultaneously,
+            # only one HTTP request fires at a time — preventing double bookings.
+            with submit_lock:
+                with winner_lock:
+                    if booking_winner:
+                        return
+                print(f"{label} Submitting booking for {tee_time['time']}...")
+                try:
+                    thread_session = make_session(jwt_token)
+                    resp = thread_session.post(
+                        f"{BASE_URL}/index.php/api/booking/users/reservations",
+                        json=booking_body,
+                        timeout=15,
+                    )
+                    result = resp.json()
+                except Exception as e:
+                    print(f"{label} Request failed: {e}")
+                    return
 
             if "teetime_id" in result:
                 with winner_lock:
