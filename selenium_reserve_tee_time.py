@@ -89,15 +89,15 @@ def stop_screen_recording(proc):
 # ---------------------------------------------------------------------------
 # Timing
 # ---------------------------------------------------------------------------
-def wait_until_eastern(hour, minute):
+def wait_until_eastern(hour, minute, second=0):
     eastern = ZoneInfo("America/New_York")
     now = datetime.now(eastern)
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
     if target <= now:
-        print(f"Target time {target.strftime('%I:%M %p %Z')} already passed, proceeding immediately.")
+        print(f"Target time {target.strftime('%I:%M:%S %p %Z')} already passed, proceeding immediately.")
         return
     secs = (target - now).total_seconds()
-    print(f"Waiting {secs:.0f}s until {target.strftime('%I:%M:%S %p %Z')}...")
+    print(f"Waiting {secs:.1f}s until {target.strftime('%I:%M:%S %p %Z')}...")
     time.sleep(secs)
     print("Target time reached.")
 
@@ -184,16 +184,9 @@ def run():
         jwt_token = user["jwt"]
         print(f"Logged in (person_id={user['person_id']}).")
 
-        # ----------------------------------------------------------------
-        # 9:00 pm — poll aggressively for up to 10s, preferring morning slots
-        # ----------------------------------------------------------------
-        if not SKIP_WAIT:
-            wait_until_eastern(21, 0)
-
         eastern = ZoneInfo("America/New_York")
         target_date = datetime.now(eastern) + timedelta(days=14)
         target_date_str = target_date.strftime("%m-%d-%Y")
-        print(f"Polling tee times for {target_date_str}...")
 
         poll_session = make_session(jwt_token)
         poll_params = [
@@ -209,9 +202,35 @@ def run():
         for sid in SCHEDULE_IDS:
             poll_params.append(("schedule_ids[]", sid))
 
-        best_tee_times = []
-        poll_deadline = time.time() + 10
+        # ----------------------------------------------------------------
+        # Pre-warm: fire one tee times request immediately after login to
+        # establish the TCP/TLS connection. Response will be empty (pre-9pm)
+        # but the socket stays open so the 9pm polls skip connection setup.
+        # ----------------------------------------------------------------
+        print("Pre-warming connection to tee times endpoint...")
+        try:
+            poll_session.get(
+                f"{BASE_URL}/index.php/api/booking/times",
+                params=poll_params,
+                timeout=10,
+            )
+            print("Connection pre-warmed.")
+        except Exception as e:
+            print(f"Pre-warm failed (non-fatal): {e}")
+
+        # ----------------------------------------------------------------
+        # Start hammering the endpoint at 8:59:58 — 2 seconds before 9pm.
+        # A request fired at 8:59:59.5 with a ~500ms round-trip arrives just
+        # as slots are released. Book immediately on the first non-empty
+        # response; don't wait for a "better" slot to appear.
+        # ----------------------------------------------------------------
+        if not SKIP_WAIT:
+            wait_until_eastern(20, 59, second=58)
+
+        print(f"Polling tee times for {target_date_str}...")
+        tee_times = []
         poll_attempt = 0
+        poll_deadline = time.time() + 60  # give up after 60s
         while time.time() < poll_deadline:
             poll_attempt += 1
             try:
@@ -228,19 +247,14 @@ def run():
             if isinstance(data, list) and data:
                 data.sort(key=lambda t: t["time"])
                 morning = [t for t in data if int(t["time"].split()[1].split(":")[0]) < 10]
-                print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am.")
-                if morning:
-                    best_tee_times = data
-                    break
-                elif not best_tee_times:
-                    best_tee_times = data
-            time.sleep(0.1)  # tighter polling now that we're not waiting for CAPTCHA
+                print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am — booking immediately.")
+                tee_times = data
+                break  # book on first non-empty response, no waiting
 
-        if not best_tee_times:
-            raise RuntimeError(f"No tee times for {target_date_str} after 10s of polling.")
+        if not tee_times:
+            raise RuntimeError(f"No tee times for {target_date_str} after 60s of polling.")
 
-        early = [t for t in best_tee_times if int(t["time"].split()[1].split(":")[0]) < 10]
-        candidates = (early if early else best_tee_times)[:NUM_PARALLEL]
+        candidates = tee_times[:NUM_PARALLEL]
         print(f"Candidates: {[t['time'] for t in candidates]}")
 
         if DRY_RUN:
