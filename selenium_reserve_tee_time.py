@@ -184,8 +184,7 @@ def run():
         jwt_token = user["jwt"]
         print(f"Logged in (person_id={user['person_id']}).")
 
-        eastern = ZoneInfo("America/New_York")
-        target_date = datetime.now(eastern) + timedelta(days=14)
+        target_date = datetime.now(ZoneInfo("America/New_York")) + timedelta(days=14)
         target_date_str = target_date.strftime("%m-%d-%Y")
 
         poll_session = make_session(jwt_token)
@@ -231,6 +230,7 @@ def run():
         tee_times = []
         poll_attempt = 0
         poll_deadline = time.time() + 60  # give up after 60s
+        eastern = ZoneInfo("America/New_York")
         while time.time() < poll_deadline:
             poll_attempt += 1
             try:
@@ -247,9 +247,22 @@ def run():
             if isinstance(data, list) and data:
                 data.sort(key=lambda t: t["time"])
                 morning = [t for t in data if int(t["time"].split()[1].split(":")[0]) < 10]
-                print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am — booking immediately.")
-                tee_times = data
-                break  # book on first non-empty response, no waiting
+                now_et = datetime.now(eastern)
+                after_9pm = SKIP_WAIT or (now_et.hour >= 21)
+                print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am"
+                      f"{' — booking immediately.' if after_9pm else ' — waiting for 9pm before booking.'}")
+                if morning and after_9pm:
+                    # Morning slots found after 9pm — book immediately.
+                    tee_times = data
+                    break
+                elif after_9pm and not tee_times:
+                    # Past 9pm, no morning slots — take what we have.
+                    tee_times = data
+                    break
+                elif not after_9pm:
+                    # Before 9pm — keep polling; don't book pre-released afternoon slots
+                    # before morning slots have a chance to appear at exactly 9pm.
+                    pass
 
         if not tee_times:
             raise RuntimeError(f"No tee times for {target_date_str} after 60s of polling.")
