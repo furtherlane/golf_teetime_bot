@@ -1,7 +1,8 @@
 #!/Users/steve/apps/foreup-autores/.venv/bin/python3
 """
 ForeUp tee time booking bot — pure HTTP API (no browser/Selenium).
-Logs in at 8:59pm, polls for tee times at 9pm, books the earliest slot.
+Logs in at 8:59pm, polls both Francis A. Byrne and Hendricks Field in parallel
+at 9pm, and books the earliest available slot across both courses.
 CAPTCHA is not enforced server-side, so we skip it entirely and book instantly.
 """
 import os
@@ -21,13 +22,19 @@ from dotenv import dotenv_values
 # ForeUp constants (from HAR analysis 2026-08-02)
 # ---------------------------------------------------------------------------
 COURSE_ID        = "22528"
-SCHEDULE_ID      = "11078"   # Francis A. Byrne Golf Course
-SCHEDULE_IDS     = ["11078", "11075", "13190", "11077"]  # all Essex County teesheets
 BOOKING_CLASS_ID = "49773"   # Gold Cardholders
 BASE_URL         = "https://foreupsoftware.com"
-BOOKING_PAGE     = f"{BASE_URL}/index.php/booking/{COURSE_ID}/{SCHEDULE_ID}"
 
-NUM_PARALLEL = 3   # number of simultaneous booking attempts
+# Courses to poll simultaneously. The tee time objects returned by each
+# course's API already contain all fields needed for booking (schedule_id,
+# teesheet_side_id, course_id, etc.), so no extra config is needed here.
+COURSES = [
+    {"name": "Francis A. Byrne", "schedule_id": "11078"},
+    {"name": "Hendricks Field",  "schedule_id": "11075"},
+]
+
+BOOKING_PAGE = f"{BASE_URL}/index.php/booking/{COURSE_ID}/{COURSES[0]['schedule_id']}"
+NUM_PARALLEL = 3   # top N slots (across both courses) to attempt booking
 
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teetime.lock")
 config    = dotenv_values(".env")
@@ -146,6 +153,20 @@ def make_session(jwt_token=""):
     return s
 
 
+def poll_params_for(schedule_id, date_str):
+    return [
+        ("time",          "all"),
+        ("date",          date_str),
+        ("holes",         "18"),
+        ("players",       "1"),
+        ("booking_class", BOOKING_CLASS_ID),
+        ("schedule_id",   schedule_id),
+        ("specials_only", "0"),
+        ("api_key",       ""),
+        ("schedule_ids[]", schedule_id),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Main booking flow
 # ---------------------------------------------------------------------------
@@ -187,88 +208,88 @@ def run():
         target_date = datetime.now(ZoneInfo("America/New_York")) + timedelta(days=14)
         target_date_str = target_date.strftime("%m-%d-%Y")
 
-        poll_session = make_session(jwt_token)
-        poll_params = [
-            ("time",          "all"),
-            ("date",          target_date_str),
-            ("holes",         "18"),
-            ("players",       "1"),
-            ("booking_class", BOOKING_CLASS_ID),
-            ("schedule_id",   SCHEDULE_ID),
-            ("specials_only", "0"),
-            ("api_key",       ""),
-        ]
-        for sid in SCHEDULE_IDS:
-            poll_params.append(("schedule_ids[]", sid))
+        # ----------------------------------------------------------------
+        # Pre-warm: fire one request per course immediately after login to
+        # establish TCP/TLS so the 9pm polls reuse warm connections.
+        # ----------------------------------------------------------------
+        print("Pre-warming connections...")
+        for course in COURSES:
+            s = make_session(jwt_token)
+            try:
+                s.get(f"{BASE_URL}/index.php/api/booking/times",
+                      params=poll_params_for(course["schedule_id"], target_date_str),
+                      timeout=10)
+                print(f"  {course['name']} pre-warmed.")
+            except Exception as e:
+                print(f"  {course['name']} pre-warm failed (non-fatal): {e}")
+            course["_warmup_session"] = s  # reuse for polling
 
         # ----------------------------------------------------------------
-        # Pre-warm: fire one tee times request immediately after login to
-        # establish the TCP/TLS connection. Response will be empty (pre-9pm)
-        # but the socket stays open so the 9pm polls skip connection setup.
-        # ----------------------------------------------------------------
-        print("Pre-warming connection to tee times endpoint...")
-        try:
-            poll_session.get(
-                f"{BASE_URL}/index.php/api/booking/times",
-                params=poll_params,
-                timeout=10,
-            )
-            print("Connection pre-warmed.")
-        except Exception as e:
-            print(f"Pre-warm failed (non-fatal): {e}")
-
-        # ----------------------------------------------------------------
-        # Start hammering the endpoint at 8:59:58 — 2 seconds before 9pm.
-        # A request fired at 8:59:59.5 with a ~500ms round-trip arrives just
-        # as slots are released. Book immediately on the first non-empty
-        # response; don't wait for a "better" slot to appear.
+        # Poll both courses in parallel from 8:59:58, don't book until 9pm.
+        # On first post-9pm poll, merge results from both courses, sort by
+        # time, and immediately book the top NUM_PARALLEL earliest slots.
         # ----------------------------------------------------------------
         if not SKIP_WAIT:
             wait_until_eastern(20, 59, second=58)
 
-        print(f"Polling tee times for {target_date_str}...")
-        tee_times = []
+        print(f"Polling both courses for {target_date_str}...")
+        combined_tee_times = []
         poll_attempt = 0
-        poll_deadline = time.time() + 60  # give up after 60s
+        poll_deadline = time.time() + 60
         eastern = ZoneInfo("America/New_York")
+
         while time.time() < poll_deadline:
             poll_attempt += 1
-            try:
-                resp = poll_session.get(
-                    f"{BASE_URL}/index.php/api/booking/times",
-                    params=poll_params,
-                    timeout=5,
-                )
-                data = resp.json() if resp.ok else []
-            except Exception as e:
-                print(f"Poll error (attempt {poll_attempt}): {e}")
-                data = []
+            results = {}
 
-            if isinstance(data, list) and data:
-                data.sort(key=lambda t: t["time"])
-                morning = [t for t in data if int(t["time"].split()[1].split(":")[0]) < 10]
+            def fetch_course(course, res=results):
+                sid = course["schedule_id"]
+                try:
+                    r = course["_warmup_session"].get(
+                        f"{BASE_URL}/index.php/api/booking/times",
+                        params=poll_params_for(sid, target_date_str),
+                        timeout=5,
+                    )
+                    res[sid] = r.json() if r.ok else []
+                except Exception as e:
+                    print(f"Poll error [{course['name']}] attempt {poll_attempt}: {e}")
+                    res[sid] = []
+
+            threads = [threading.Thread(target=fetch_course, args=(c,), daemon=True)
+                       for c in COURSES]
+            for t in threads: t.start()
+            for t in threads: t.join(timeout=6)
+
+            merged = []
+            for course in COURSES:
+                data = results.get(course["schedule_id"], [])
+                if isinstance(data, list):
+                    merged.extend(data)
+
+            if merged:
+                merged.sort(key=lambda t: t["time"])
+                morning = [t for t in merged if int(t["time"].split()[1].split(":")[0]) < 10]
                 now_et = datetime.now(eastern)
                 after_9pm = SKIP_WAIT or (now_et.hour >= 21)
-                print(f"Poll {poll_attempt}: {len(data)} tee times, {len(morning)} before 10am"
-                      f"{' — booking immediately.' if after_9pm else ' — waiting for 9pm before booking.'}")
-                if morning and after_9pm:
-                    # Morning slots found after 9pm — book immediately.
-                    tee_times = data
-                    break
-                elif after_9pm and not tee_times:
-                    # Past 9pm, no morning slots — take what we have.
-                    tee_times = data
-                    break
-                elif not after_9pm:
-                    # Before 9pm — keep polling; don't book pre-released afternoon slots
-                    # before morning slots have a chance to appear at exactly 9pm.
-                    pass
 
-        if not tee_times:
-            raise RuntimeError(f"No tee times for {target_date_str} after 60s of polling.")
+                by_course = {}
+                for t in merged:
+                    by_course.setdefault(t["course_name"], 0)
+                    by_course[t["course_name"]] += 1
+                summary = ", ".join(f"{n}: {c}" for n, c in by_course.items())
+                print(f"Poll {poll_attempt}: {len(merged)} total ({summary}), "
+                      f"{len(morning)} before 10am"
+                      f"{' — booking immediately.' if after_9pm else ' — waiting for 9pm.'}")
 
-        candidates = tee_times[:NUM_PARALLEL]
-        print(f"Candidates: {[t['time'] for t in candidates]}")
+                if after_9pm:
+                    combined_tee_times = merged
+                    break
+
+        if not combined_tee_times:
+            raise RuntimeError(f"No tee times found after 60s of polling.")
+
+        candidates = combined_tee_times[:NUM_PARALLEL]
+        print(f"Candidates: {[(t['time'], t['course_name']) for t in candidates]}")
 
         if DRY_RUN:
             for t in candidates:
@@ -276,9 +297,7 @@ def run():
             return
 
         # ----------------------------------------------------------------
-        # Book candidates — no CAPTCHA wait needed (not enforced server-side).
-        # Submissions are serialized: if slot 1 succeeds, slot 2 skips.
-        # If slot 1 is rejected, slot 2 fires immediately.
+        # Book candidates — serialized to prevent double booking.
         # ----------------------------------------------------------------
         booking_winner = {}
         winner_lock = threading.Lock()
@@ -290,13 +309,13 @@ def run():
                 **tee_time,
                 "holes":     "18",
                 "players":   1,
-                "captchaid": "0",  # not enforced server-side
+                "captchaid": "0",
             }
             with submit_lock:
                 with winner_lock:
                     if booking_winner:
                         return
-                print(f"{label} Submitting booking for {tee_time['time']}...")
+                print(f"{label} Submitting booking for {tee_time['time']} @ {tee_time['course_name']}...")
                 try:
                     thread_session = make_session(jwt_token)
                     resp = thread_session.post(
@@ -322,10 +341,8 @@ def run():
             threading.Thread(target=attempt_booking, args=(i, tt), daemon=True)
             for i, tt in enumerate(candidates)
         ]
-        for t in booking_threads:
-            t.start()
-        for t in booking_threads:
-            t.join(timeout=30)
+        for t in booking_threads: t.start()
+        for t in booking_threads: t.join(timeout=30)
 
         if booking_winner:
             result = booking_winner["result"]
